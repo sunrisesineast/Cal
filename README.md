@@ -15,9 +15,8 @@ A minimalist, elegant terminal application for tracking daily calories and weigh
 
 1.  **Clone the repository (or download the source code):**
     ```bash
-    # Make sure to replace with your actual repository URL
-    git clone https://github.com/user/repo.git
-    cd <repository-folder>
+    git clone https://github.com/sunrisesineast/Cal.git
+    cd Cal
     ```
 
 2.  **Install the application:**
