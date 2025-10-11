@@ -171,6 +171,29 @@ def log_weight(
     _add_weight_entry(timestamp, weight)
     console.print(f"[green]Logged weight: {weight}.[/green]")
 
+
+@app.command("lf", help="Shortcut for 'log food'.")
+def lf(
+    calories: int = typer.Argument(..., help="The number of calories to log."),
+    description: str = typer.Option(None, "--desc", "-d", help="An optional description of the food.")
+):
+    """Shortcut to log a food entry for the current time."""
+    check_initialized()
+    timestamp = datetime.now().isoformat()
+    _add_food_entry(timestamp, calories, description)
+    console.print(f"[green]Logged {calories} calories.[/green]")
+
+
+@app.command("lw", help="Shortcut for 'log weight'.")
+def lw(
+    weight: float = typer.Argument(..., help="Your current weight.")
+):
+    """Shortcut to log a weight entry for the current time."""
+    check_initialized()
+    timestamp = datetime.now().isoformat()
+    _add_weight_entry(timestamp, weight)
+    console.print(f"[green]Logged weight: {weight}.[/green]")
+
 @app.command()
 def config(tdee: int = typer.Option(None, "--tdee", help="Update your Total Daily Energy Expenditure (TDEE).")):
     """View or update your configuration."""
@@ -229,46 +252,104 @@ def status():
         )
     )
 
-@app.command()
-def history():
-    """Shows a daily summary and deficit/surplus for the last 7 days."""
-    check_initialized()
+def _parse_period(period_str: str) -> tuple[date | None, date | None]:
+    """Parses a period string (e.g., '7d', '4w', 'YYYY-MM-DD:YYYY-MM-DD') and returns start and end dates."""
+    if not period_str:
+        return None, None
+
+    period_str = period_str.lower().strip()
+
+    if ':' in period_str:
+        try:
+            start_str, end_str = period_str.split(':')
+            start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+            return start_date, end_date
+        except ValueError:
+            return None, None
+
+    if len(period_str) < 2 or not period_str[:-1].isdigit():
+        return None, None
+
+    num = int(period_str[:-1])
+    unit = period_str[-1]
+    end_date = date.today()
+
+    if unit == 'd':
+        start_date = end_date - timedelta(days=num - 1)
+    elif unit == 'w':
+        start_date = end_date - timedelta(weeks=num) + timedelta(days=1)
+    elif unit == 'm':
+        # Approximation: 1 month = 30 days
+        start_date = end_date - timedelta(days=num * 30)
+    elif unit == 'y':
+        # Approximation: 1 year = 365 days
+        start_date = end_date - timedelta(days=num * 365)
+    else:
+        return None, None
+    
+    return start_date, end_date
+
+def _display_history(start_date: date, end_date: date):
+    """Shows a daily summary table for a given date range."""
     config = get_config()
     tdee = int(config["USER"]["TDEE"])
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    table = Table(title="Last 7 Days Summary")
+    num_days = (end_date - start_date).days + 1
+    if num_days <= 0:
+        console.print("[yellow]Start date must be before end date.[/yellow]")
+        return
+
+    table = Table(title=f"Summary from {start_date.isoformat()} to {end_date.isoformat()} ({num_days} days)")
     table.add_column("Date", style="cyan")
     table.add_column("Calories Logged", style="yellow", justify="right")
     table.add_column("Daily Goal", style="blue", justify="right")
     table.add_column("Deficit / Surplus", justify="right")
+    table.add_column("Weight", style="magenta", justify="right")
 
     total_deficit_surplus = 0
+    weights = []
 
-    # Get all calories grouped by day for the last 7 days
-    seven_days_ago = (date.today() - timedelta(days=6)).isoformat()
+    # Get all calories grouped by day for the date range
     cursor.execute(
-        "SELECT date(timestamp) as entry_date, SUM(calories) as total_calories FROM food_entries WHERE date(timestamp) >= ? GROUP BY entry_date",
-        (seven_days_ago,)
+        "SELECT date(timestamp) as entry_date, SUM(calories) as total_calories FROM food_entries WHERE date(timestamp) BETWEEN ? AND ? GROUP BY entry_date",
+        (start_date.isoformat(), end_date.isoformat())
     )
     daily_calories_map = {row['entry_date']: row['total_calories'] for row in cursor.fetchall()}
+
+    # Get all weight entries for the date range, taking the last one per day
+    cursor.execute(
+        "SELECT date(timestamp) as entry_date, weight FROM weight_entries WHERE date(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",
+        (start_date.isoformat(), end_date.isoformat()),
+    )
+    daily_weight_map = {row['entry_date']: row['weight'] for row in cursor.fetchall()}
     conn.close()
 
-    # Iterate through the last 7 days from today backwards
-    for i in range(7):
-        current_date = date.today() - timedelta(days=i)
+    # Iterate through the date range backwards
+    for i in range(num_days):
+        current_date = end_date - timedelta(days=i)
         date_str = current_date.isoformat()
 
         calories_logged = daily_calories_map.get(date_str, 0)
         deficit_surplus = calories_logged - tdee
-        total_deficit_surplus += deficit_surplus
+        
+        # Only add to total if calories were logged
+        if calories_logged > 0:
+            total_deficit_surplus += deficit_surplus
+
+        weight = daily_weight_map.get(date_str)
+        if weight:
+            weights.append(weight)
+            weight_str = f"{weight:.1f}"
+        else:
+            weight_str = "N/A"
 
         # Color coding for deficit/surplus
         if calories_logged == 0:
-            # Don't apply color if no calories were logged for that day
-            deficit_surplus_str = f"{deficit_surplus:+d}"
+            deficit_surplus_str = "N/A"
         elif deficit_surplus < 0:
             deficit_surplus_str = f"[green]{deficit_surplus:+d}[/green]"
         else:
@@ -276,20 +357,90 @@ def history():
 
         table.add_row(
             date_str,
-            str(calories_logged),
+            str(calories_logged) if calories_logged > 0 else "0",
             str(tdee),
-            deficit_surplus_str
+            deficit_surplus_str,
+            weight_str
         )
 
     console.print(table)
 
+    # Calculate average weight
+    avg_weight = sum(weights) / len(weights) if weights else 0
+
     # Print total summary panel
     if total_deficit_surplus < 0:
-        total_str = f"[green]Total 7-Day Deficit: {total_deficit_surplus:,} kcal[/green]"
+        total_str = f"[green]Total Period Deficit: {total_deficit_surplus:,} kcal[/green]"
     else:
-        total_str = f"[red]Total 7-Day Surplus: +{total_deficit_surplus:,} kcal[/red]"
+        total_str = f"[red]Total Period Surplus: +{total_deficit_surplus:,} kcal[/red]"
 
-    console.print(Panel(total_str, title="Weekly Summary", border_style="magenta", padding=(0, 2)))
+    if avg_weight > 0:
+        total_str += f"\n[magenta]Average Weight: {avg_weight:.1f}[/magenta]"
+
+    console.print(Panel(total_str, title="Period Summary", border_style="magenta", padding=(0, 2)))
+
+
+def _interactive_history():
+    """Runs the history command in interactive mode."""
+    console.clear()
+    console.print("[bold cyan]Interactive History Mode[/bold cyan]")
+    console.print("Enter a period (e.g., '7d', '4w', '1m'), a date range ('YYYY-MM-DD:YYYY-MM-DD'), or use [N]ext/[P]revious. [Q]uit.")
+    
+    # Default to last 7 days on start
+    end_date = date.today()
+    start_date = end_date - timedelta(days=6)
+    _display_history(start_date, end_date)
+
+    while True:
+        command = console.input("[cyan]history>[/cyan] ").strip().lower()
+
+        if command == 'q':
+            break
+        
+        if not command:
+            continue
+
+        if command == 'n':
+            # Move to next period
+            duration = (end_date - start_date)
+            start_date = end_date + timedelta(days=1)
+            end_date = start_date + duration
+        elif command == 'p':
+            # Move to previous period
+            duration = (end_date - start_date)
+            end_date = start_date - timedelta(days=1)
+            start_date = end_date - duration
+        else:
+            # It's a new period string
+            new_start, new_end = _parse_period(command)
+            if not new_start:
+                console.print(f"[bold red]Invalid period format: '{command}'.[/bold red]")
+                console.print("Use formats like '7d', '4w', '1m', '1y', or 'YYYY-MM-DD:YYYY-MM-DD'.")
+                continue
+            start_date, end_date = new_start, new_end
+        
+        console.clear()
+        console.print("[bold cyan]Interactive History Mode[/bold cyan]")
+        console.print("Enter a period (e.g., '7d', '4w', '1m'), a date range ('YYYY-MM-DD:YYYY-MM-DD'), or use [N]ext/[P]revious. [Q]uit.")
+        _display_history(start_date, end_date)
+
+
+@app.command()
+def history(
+    period: str = typer.Argument(None, help="Period to view: e.g., '7d', '4w', '1m', '1y', or a date range 'YYYY-MM-DD:YYYY-MM-DD'. Leave empty for interactive mode.", show_default=False)
+):
+    """Shows a daily summary of calories, deficits, and weight. Can be run in interactive mode."""
+    check_initialized()
+    
+    if period is None:
+        _interactive_history()
+    else:
+        start_date, end_date = _parse_period(period)
+        if not start_date:
+            console.print(f"[bold red]Invalid period format: '{period}'.[/bold red]")
+            console.print("Use formats like '7d', '4w', '1m', '1y', or 'YYYY-MM-DD:YYYY-MM-DD'.")
+            raise typer.Exit()
+        _display_history(start_date, end_date)
 
 
 def _draw_review_screen(current_date: date):

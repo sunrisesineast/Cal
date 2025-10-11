@@ -62,6 +62,18 @@ Log food or weight entries for the current time.
     cal log weight 185.5
     ```
 
+#### Shortcuts
+
+For even faster logging, you can use the `lf` and `lw` commands:
+
+```bash
+# Equivalent to 'cal log food'
+cal lf 550 --desc "Lunch: Sandwich"
+
+# Equivalent to 'cal log weight'
+cal lw 185.5
+```
+
 ### `cal status`
 
 Display a summary panel for the current day, including calories consumed vs. your goal, your most recent weight, and a progress bar.
