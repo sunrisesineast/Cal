@@ -5,10 +5,17 @@ import pathlib
 import sqlite3
 import configparser
 from datetime import datetime
+from typing import Union
 
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
 from datetime import date, timedelta
+
+
+# --- Imports for single-character input ---
+import platform
+if platform.system() == "Windows":
+    import msvcrt
 
 
 # --- Configuration ---
@@ -24,6 +31,25 @@ app.add_typer(log_app, name="log")
 console = Console()
 
 # --- Helper Functions ---
+
+def _get_char():
+    """Gets a single character from stdin, cross-platform."""
+    if platform.system() == "Windows":
+        # Returns a byte string, so decode it
+        return msvcrt.getch().decode('utf-8', errors='ignore')
+    else:
+        import sys
+        import tty
+        import termios
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return ch
+
 def get_config():
     """Reads and returns the configuration."""
     config = configparser.ConfigParser()
@@ -49,27 +75,30 @@ def create_db_tables():
     """Creates the necessary database tables if they don't exist."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.executescript("""
         CREATE TABLE IF NOT EXISTS food_entries (
             id INTEGER PRIMARY KEY,
             timestamp TEXT NOT NULL,
             calories INTEGER NOT NULL,
             description TEXT
-        )
-    """)
-    cursor.execute("""
+        );
         CREATE TABLE IF NOT EXISTS weight_entries (
             id INTEGER PRIMARY KEY,
             timestamp TEXT NOT NULL,
             weight REAL NOT NULL
-        )
+        );
+        CREATE TABLE IF NOT EXISTS waist_entries (
+            id INTEGER PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            waist_length REAL NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
 
 
 # --- Internal Database Logic ---
-def _add_food_entry(timestamp: str, calories: int, description: str | None):
+def _add_food_entry(timestamp: str, calories: int, description: Union[str, None]):
     """Adds a food entry to the database with a specific timestamp."""
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -91,6 +120,17 @@ def _add_weight_entry(timestamp: str, weight: float):
     conn.commit()
     conn.close()
 
+def _add_waist_entry(timestamp: str, waist_length: float):
+    """Adds a waist entry to the database with a specific timestamp."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO waist_entries (timestamp, waist_length) VALUES (?, ?)",
+        (timestamp, waist_length)
+    )
+    conn.commit()
+    conn.close()
+
 
 def _delete_entry(entry_type: str, entry_id: int):
     """Deletes an entry from the database."""
@@ -102,14 +142,20 @@ def _delete_entry(entry_type: str, entry_id: int):
     conn.close()
 
 
-def _edit_food_entry(entry_id: int, calories: int, description: str | None):
+def _edit_food_entry(entry_id: int, calories: int, description: Union[str, None], timestamp: Union[str, None] = None):
     """Updates a food entry in the database."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE food_entries SET calories = ?, description = ? WHERE id = ?",
-        (calories, description, entry_id)
-    )
+    if timestamp:
+        cursor.execute(
+            "UPDATE food_entries SET calories = ?, description = ?, timestamp = ? WHERE id = ?",
+            (calories, description, timestamp, entry_id)
+        )
+    else:
+        cursor.execute(
+            "UPDATE food_entries SET calories = ?, description = ? WHERE id = ?",
+            (calories, description, entry_id)
+        )
     conn.commit()
     conn.close()
 
@@ -150,16 +196,37 @@ def init():
     console.print(f"Database created at: {DATABASE_FILE}")
 
 
+def _parse_time(time_str: str) -> Union[datetime.time, None]:
+    """Parses a time string in HH:MM or H:MM format."""
+    try:
+        # Handles HH:MM, H:MM, HH:MM:SS, etc.
+        return datetime.strptime(time_str, "%H:%M").time()
+    except ValueError:
+        return None
+
 @log_app.command("food")
 def log_food(
     calories: int = typer.Argument(..., help="The number of calories to log."),
-    description: str = typer.Option(None, "--desc", "-d", help="An optional description of the food.")
+    description: str = typer.Option(None, "--desc", "-d", help="An optional description of the food."),
+    time_str: str = typer.Option(None, "--time", "-t", help="Time of the meal in HH:MM format. Defaults to now.")
 ):
-    """Logs a food entry for the current time."""
+    """Logs a food entry for a specific time."""
     check_initialized()
-    timestamp = datetime.now().isoformat()
+    
+    now = datetime.now()
+    meal_time = now.time()
+
+    if time_str:
+        parsed_time = _parse_time(time_str)
+        if parsed_time:
+            meal_time = parsed_time
+        else:
+            console.print(f"[bold red]Invalid time format: '{time_str}'. Please use HH:MM.[/bold red]")
+            raise typer.Exit()
+
+    timestamp = datetime.combine(now.date(), meal_time).isoformat()
     _add_food_entry(timestamp, calories, description)
-    console.print(f"[green]Logged {calories} calories.[/green]")
+    console.print(f"[green]Logged {calories} calories at {meal_time.strftime('%H:%M')}.[/green]")
 
 @log_app.command("weight")
 def log_weight(
@@ -171,17 +238,40 @@ def log_weight(
     _add_weight_entry(timestamp, weight)
     console.print(f"[green]Logged weight: {weight}.[/green]")
 
+@log_app.command("waist")
+def log_waist(
+    waist_length: float = typer.Argument(..., help="Your current waist length in inches.")
+):
+    """Logs a waist length entry for the current time."""
+    check_initialized()
+    timestamp = datetime.now().isoformat()
+    _add_waist_entry(timestamp, waist_length)
+    console.print(f"[green]Logged waist length: {waist_length} inches.[/green]")
+
 
 @app.command("lf", help="Shortcut for 'log food'.")
 def lf(
     calories: int = typer.Argument(..., help="The number of calories to log."),
-    description: str = typer.Option(None, "--desc", "-d", help="An optional description of the food.")
+    description: str = typer.Option(None, "--desc", "-d", help="An optional description of the food."),
+    time_str: str = typer.Option(None, "--time", "-t", help="Time of the meal in HH:MM format. Defaults to now.")
 ):
-    """Shortcut to log a food entry for the current time."""
+    """Shortcut to log a food entry for a specific time."""
     check_initialized()
-    timestamp = datetime.now().isoformat()
+    
+    now = datetime.now()
+    meal_time = now.time()
+
+    if time_str:
+        parsed_time = _parse_time(time_str)
+        if parsed_time:
+            meal_time = parsed_time
+        else:
+            console.print(f"[bold red]Invalid time format: '{time_str}'. Please use HH:MM.[/bold red]")
+            raise typer.Exit()
+
+    timestamp = datetime.combine(now.date(), meal_time).isoformat()
     _add_food_entry(timestamp, calories, description)
-    console.print(f"[green]Logged {calories} calories.[/green]")
+    console.print(f"[green]Logged {calories} calories at {meal_time.strftime('%H:%M')}.[/green]")
 
 
 @app.command("lw", help="Shortcut for 'log weight'.")
@@ -193,6 +283,16 @@ def lw(
     timestamp = datetime.now().isoformat()
     _add_weight_entry(timestamp, weight)
     console.print(f"[green]Logged weight: {weight}.[/green]")
+
+@app.command("lwl", help="Shortcut for 'log waist'.")
+def lwl(
+    waist_length: float = typer.Argument(..., help="Your current waist length in inches.")
+):
+    """Shortcut to log a waist length entry for the current time."""
+    check_initialized()
+    timestamp = datetime.now().isoformat()
+    _add_waist_entry(timestamp, waist_length)
+    console.print(f"[green]Logged waist length: {waist_length} inches.[/green]")
 
 @app.command()
 def config(tdee: int = typer.Option(None, "--tdee", help="Update your Total Daily Energy Expenditure (TDEE).")):
@@ -230,6 +330,14 @@ def status():
     latest_weight_row = cursor.fetchone()
     latest_weight = f"{latest_weight_row[0]}" if latest_weight_row else "Not Available"
 
+    # Get 7-day waist average
+    seven_days_ago = (date.today() - timedelta(days=7)).isoformat()
+    cursor.execute(
+        "SELECT AVG(waist_length) FROM waist_entries WHERE date(timestamp) >= ?", (seven_days_ago,)
+    )
+    avg_waist_row = cursor.fetchone()
+    avg_waist = f"{avg_waist_row[0]:.2f} inches" if avg_waist_row and avg_waist_row[0] else "Not Available"
+
     conn.close()
 
     # Create renderable content
@@ -239,6 +347,7 @@ def status():
     panel_group = Group(
         f"[bold]Calories:[/bold] {calories_today} / {tdee} kcal ({progress}%)",
         f"[bold]Weight:[/bold]   {latest_weight}",
+        f"[bold]Waist (7d avg):[/bold] {avg_waist}",
         "",  # For a newline
         progress_bar
     )
@@ -252,7 +361,7 @@ def status():
         )
     )
 
-def _parse_period(period_str: str) -> tuple[date | None, date | None]:
+def _parse_period(period_str: str) -> tuple[Union[date, None], Union[date, None]]:
     """Parses a period string (e.g., '7d', '4w', 'YYYY-MM-DD:YYYY-MM-DD') and returns start and end dates."""
     if not period_str:
         return None, None
@@ -384,45 +493,52 @@ def _interactive_history():
     """Runs the history command in interactive mode."""
     console.clear()
     console.print("[bold cyan]Interactive History Mode[/bold cyan]")
-    console.print("Enter a period (e.g., '7d', '4w', '1m'), a date range ('YYYY-MM-DD:YYYY-MM-DD'), or use [N]ext/[P]revious. [Q]uit.")
-    
+    console.print("Use [N]ext/[P]revious, [E]nter a new period, or [Q]uit.")
+
     # Default to last 7 days on start
     end_date = date.today()
     start_date = end_date - timedelta(days=6)
     _display_history(start_date, end_date)
 
     while True:
-        command = console.input("[cyan]history>[/cyan] ").strip().lower()
+        command = _get_char().lower()
 
         if command == 'q':
             break
-        
-        if not command:
-            continue
 
+        should_redraw = False
         if command == 'n':
             # Move to next period
             duration = (end_date - start_date)
             start_date = end_date + timedelta(days=1)
             end_date = start_date + duration
+            should_redraw = True
         elif command == 'p':
             # Move to previous period
             duration = (end_date - start_date)
             end_date = start_date - timedelta(days=1)
             start_date = end_date - duration
-        else:
-            # It's a new period string
-            new_start, new_end = _parse_period(command)
-            if not new_start:
-                console.print(f"[bold red]Invalid period format: '{command}'.[/bold red]")
-                console.print("Use formats like '7d', '4w', '1m', '1y', or 'YYYY-MM-DD:YYYY-MM-DD'.")
-                continue
-            start_date, end_date = new_start, new_end
-        
-        console.clear()
-        console.print("[bold cyan]Interactive History Mode[/bold cyan]")
-        console.print("Enter a period (e.g., '7d', '4w', '1m'), a date range ('YYYY-MM-DD:YYYY-MM-DD'), or use [N]ext/[P]revious. [Q]uit.")
-        _display_history(start_date, end_date)
+            should_redraw = True
+        elif command == 'e':
+            period_str = console.input("[cyan]Enter period> [/cyan]").strip().lower()
+            if not period_str:
+                # Redraw to clear the input line
+                should_redraw = True
+            else:
+                new_start, new_end = _parse_period(period_str)
+                if not new_start:
+                    console.print(f"[bold red]Invalid period format: '{period_str}'.[/bold red]")
+                    console.print("Use formats like '7d', '4w', '1m', '1y', or 'YYYY-MM-DD:YYYY-MM-DD'.")
+                    console.input("Press Enter to continue...")
+                else:
+                    start_date, end_date = new_start, new_end
+                should_redraw = True
+
+        if should_redraw:
+            console.clear()
+            console.print("[bold cyan]Interactive History Mode[/bold cyan]")
+            console.print("Use [N]ext/[P]revious, [E]nter a new period, or [Q]uit.")
+            _display_history(start_date, end_date)
 
 
 @app.command()
@@ -441,6 +557,78 @@ def history(
             console.print("Use formats like '7d', '4w', '1m', '1y', or 'YYYY-MM-DD:YYYY-MM-DD'.")
             raise typer.Exit()
         _display_history(start_date, end_date)
+
+
+def _display_waist_history(start_date: date, end_date: date):
+    """Shows a daily summary table for a given date range."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    num_days = (end_date - start_date).days + 1
+    if num_days <= 0:
+        console.print("[yellow]Start date must be before end date.[/yellow]")
+        return
+
+    table = Table(title=f"Waist Summary from {start_date.isoformat()} to {end_date.isoformat()} ({num_days} days)")
+    table.add_column("Date", style="cyan")
+    table.add_column("Waist Length", style="magenta", justify="right")
+
+    # Get all waist entries for the date range, taking the last one per day
+    cursor.execute(
+        "SELECT date(timestamp) as entry_date, waist_length FROM waist_entries WHERE date(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",
+        (start_date.isoformat(), end_date.isoformat()),
+    )
+    daily_waist_map = {row['entry_date']: row['waist_length'] for row in cursor.fetchall()}
+    conn.close()
+
+    waist_lengths = []
+    # Iterate through the date range backwards
+    for i in range(num_days):
+        current_date = end_date - timedelta(days=i)
+        date_str = current_date.isoformat()
+
+        waist_length = daily_waist_map.get(date_str)
+        if waist_length:
+            waist_lengths.append(waist_length)
+            waist_length_str = f"{waist_length:.2f}"
+        else:
+            waist_length_str = "N/A"
+
+        table.add_row(
+            date_str,
+            waist_length_str
+        )
+
+    console.print(table)
+
+    # Calculate moving average
+    avg_waist = sum(waist_lengths) / len(waist_lengths) if waist_lengths else 0
+
+    # Print total summary panel
+    if avg_waist > 0:
+        total_str = f"[magenta]Average Waist: {avg_waist:.2f}[/magenta]"
+        console.print(Panel(total_str, title="Period Summary", border_style="magenta", padding=(0, 2)))
+
+
+@app.command()
+def waist(
+    period: str = typer.Argument(None, help="Period to view: e.g., '7d', '4w', '1m', '1y', or a date range 'YYYY-MM-DD:YYYY-MM-DD'. Leave empty for interactive mode.", show_default=False)
+):
+    """Shows a summary of waist measurements. Can be run in interactive mode."""
+    check_initialized()
+    
+    if period is None:
+        # For now, no interactive mode for waist, just show last 7 days
+        end_date = date.today()
+        start_date = end_date - timedelta(days=6)
+        _display_waist_history(start_date, end_date)
+    else:
+        start_date, end_date = _parse_period(period)
+        if not start_date:
+            console.print(f"[bold red]Invalid period format: '{period}'.[/bold red]")
+            console.print("Use formats like '7d', '4w', '1m', '1y', or 'YYYY-MM-DD:YYYY-MM-DD'.")
+            raise typer.Exit()
+        _display_waist_history(start_date, end_date)
 
 
 def _draw_review_screen(current_date: date):
@@ -475,9 +663,11 @@ def _draw_review_screen(current_date: date):
     for i, entry in enumerate(entries, 1):
         id_map.append({"id": entry["id"], "type": entry["type"]})
         if entry["type"] == "food":
-            line = f"  {i}. [bold yellow]Food[/bold yellow]:   {entry['calories']} kcal - '{entry['description'] or ''}'"
+            time_str = datetime.fromisoformat(entry['timestamp']).strftime("%H:%M")
+            line = f"  {i}. [bold yellow]Food[/bold yellow]:   {entry['calories']} kcal at {time_str} - '{entry['description'] or ''}'"
         else:
-            line = f"  {i}. [bold cyan]Weight[/bold cyan]: {entry['calories']} lbs" # 'calories' column holds weight in the UNION
+            time_str = datetime.fromisoformat(entry['timestamp']).strftime("%H:%M")
+            line = f"  {i}. [bold cyan]Weight[/bold cyan]: {entry['calories']} lbs at {time_str}" # 'calories' column holds weight in the UNION
         entry_lines.append(line)
 
     summary_text = f"[bold]Calories:[/bold] {calories_today} / {tdee} kcal  |  [bold]Deficit/Surplus:[/bold] {deficit_surplus:+} kcal"
@@ -496,7 +686,7 @@ def _draw_review_screen(current_date: date):
             padding=(1, 2)
         )
     )
-    console.print("[[A]dd [E]dit # [D]elete #]  |  [[P]rev Day [N]ext Day]  |  [[Q]uit]")
+    console.print("[[A]dd [E]dit [D]elete]  |  [[P]rev Day [N]ext Day]  |  [[Q]uit]")
     return id_map
 
 
@@ -519,9 +709,7 @@ def review(date_str: str = typer.Argument(None, help="The date to review in YYYY
     while True:
         id_map = _draw_review_screen(current_date)
         
-        command = console.input("> ").lower().strip()
-        cmd_parts = command.split()
-        action = cmd_parts[0] if cmd_parts else ""
+        action = _get_char().lower()
 
         if action == "q":
             break
@@ -538,6 +726,12 @@ def review(date_str: str = typer.Argument(None, help="The date to review in YYYY
                 try:
                     cals = int(console.input("Calories: "))
                     desc = console.input("Description (optional): ")
+                    time_str = console.input("Time (HH:MM, optional): ")
+                    meal_time = _parse_time(time_str) if time_str else datetime.now().time()
+                    if not meal_time:
+                        console.input("[red]Invalid time format. Press Enter to continue...[/red]")
+                        continue
+                    ts = datetime.combine(current_date, meal_time).isoformat()
                     _add_food_entry(ts, cals, desc)
                 except ValueError:
                     console.input("[red]Invalid number. Press Enter to continue...[/red]")
@@ -548,11 +742,16 @@ def review(date_str: str = typer.Argument(None, help="The date to review in YYYY
                 except ValueError:
                     console.input("[red]Invalid number. Press Enter to continue...[/red]")
         elif action in ("d", "e"):
-            if len(cmd_parts) < 2 or not cmd_parts[1].isdigit():
-                console.input("[red]Command requires an entry number (e.g., 'd 1'). Press Enter to continue...[/red]")
+            try:
+                num_str = console.input(f"Entry number to {'delete' if action == 'd' else 'edit'}: ")
+                if not num_str.isdigit():
+                    console.input("[red]Invalid entry number. Press Enter to continue...[/red]")
+                    continue
+                num = int(num_str)
+            except (ValueError, TypeError):
+                console.input("[red]Invalid entry number. Press Enter to continue...[/red]")
                 continue
-            
-            num = int(cmd_parts[1])
+
             if not (0 < num < len(id_map)):
                 console.input(f"[red]Invalid entry number: {num}. Press Enter to continue...[/red]")
                 continue
@@ -576,7 +775,15 @@ def review(date_str: str = typer.Argument(None, help="The date to review in YYYY
                         new_desc = console.input(f"Description (current: '{current['description'] or ''}'): ")
                         # If user enters nothing, keep original. If they enter something, use it.
                         final_desc = new_desc if new_desc is not None else current['description']
-                        _edit_food_entry(entry_id, new_cals, final_desc)
+
+                        time_str = console.input(f"Time (current: {datetime.fromisoformat(current['timestamp']).strftime('%H:%M')} HH:MM, optional): ")
+                        meal_time = _parse_time(time_str) if time_str else datetime.fromisoformat(current['timestamp']).time()
+                        if not meal_time:
+                            console.input("[red]Invalid time format. Press Enter to continue...[/red]")
+                            continue
+                        ts = datetime.combine(datetime.fromisoformat(current['timestamp']).date(), meal_time).isoformat()
+
+                        _edit_food_entry(entry_id, new_cals, final_desc, ts)
                     except ValueError:
                         console.input("[red]Invalid number. Press Enter to continue...[/red]")
                 else: # weight
