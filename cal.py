@@ -418,6 +418,7 @@ def _display_history(start_date: date, end_date: date):
     table.add_column("Daily Goal", style="blue", justify="right")
     table.add_column("Deficit / Surplus", justify="right")
     table.add_column("Weight", style="magenta", justify="right")
+    table.add_column("Waist", style="green", justify="right")
 
     total_deficit_surplus = 0
     weights = []
@@ -435,7 +436,17 @@ def _display_history(start_date: date, end_date: date):
         (start_date.isoformat(), end_date.isoformat()),
     )
     daily_weight_map = {row['entry_date']: row['weight'] for row in cursor.fetchall()}
+
+    # Get all waist entries for the date range, taking the last one per day
+    cursor.execute(
+        "SELECT date(timestamp) as entry_date, waist_length FROM waist_entries WHERE date(timestamp) BETWEEN ? AND ? ORDER BY timestamp ASC",
+        (start_date.isoformat(), end_date.isoformat()),
+    )
+    daily_waist_map = {row['entry_date']: row['waist_length'] for row in cursor.fetchall()}
     conn.close()
+
+    waist_lengths = []
+
 
     # Iterate through the date range backwards
     for i in range(num_days):
@@ -456,6 +467,13 @@ def _display_history(start_date: date, end_date: date):
         else:
             weight_str = "N/A"
 
+        waist_length = daily_waist_map.get(date_str)
+        if waist_length:
+            waist_lengths.append(waist_length)
+            waist_length_str = f"{waist_length:.2f}"
+        else:
+            waist_length_str = "N/A"
+
         # Color coding for deficit/surplus
         if calories_logged == 0:
             deficit_surplus_str = "N/A"
@@ -469,13 +487,17 @@ def _display_history(start_date: date, end_date: date):
             str(calories_logged) if calories_logged > 0 else "0",
             str(tdee),
             deficit_surplus_str,
-            weight_str
+            weight_str,
+            waist_length_str
         )
 
     console.print(table)
 
     # Calculate average weight
     avg_weight = sum(weights) / len(weights) if weights else 0
+
+    # Calculate moving average
+    avg_waist = sum(waist_lengths) / len(waist_lengths) if waist_lengths else 0
 
     # Print total summary panel
     if total_deficit_surplus < 0:
@@ -485,6 +507,9 @@ def _display_history(start_date: date, end_date: date):
 
     if avg_weight > 0:
         total_str += f"\n[magenta]Average Weight: {avg_weight:.1f}[/magenta]"
+    
+    if avg_waist > 0:
+        total_str += f"\n[green]Average Waist: {avg_waist:.2f}[/green]"
 
     console.print(Panel(total_str, title="Period Summary", border_style="magenta", padding=(0, 2)))
 
